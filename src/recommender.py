@@ -263,6 +263,15 @@ class Recommender:
             redis_url=c.redis_url, namespace="pre",
             ttl=c.response_ttl_sec, lru_size=c.lru_size,
         )
+        # LLM-rerank results (kg_id → alpha/rationale), keyed by query text.
+        # The pre-canvas cache above holds the ranking from BEFORE the rerank,
+        # so without this every repeat click paid for the LLM again (~3-7 s).
+        # The candidate pool is deterministic for a given query text + KG
+        # index version, so the scores stay valid for the embedding TTL.
+        self._rr_cache = KVCache(
+            redis_url=c.redis_url, namespace="rr",
+            ttl=c.embedding_ttl_sec, lru_size=c.lru_size,
+        )
         self._sem_cache = SemanticCache(
             dim=embedder.dimensions,
             threshold=c.semantic_threshold,
@@ -510,6 +519,7 @@ class Recommender:
             "caches": {
                 "embedding": self._emb_cache.stats(),
                 "pre_canvas": self._pre_cache.stats(),
+                "rerank":    self._rr_cache.stats(),
                 "semantic":  self._sem_cache.stats(),
             },
         }
@@ -528,7 +538,7 @@ class Recommender:
         run_llm = self._should_run_rerank(candidates)
         if run_llm and req.include_new_nodes:
             try:
-                self._llm_rerank(req.query_node, candidates[: req.max_suggestions * 2])
+                self._rerank(req.query_node, candidates, req.max_suggestions * 2)
             except Exception as e:
                 LOG.warning("LLM rerank failed (%s); using deterministic scores", e)
         resp = self._project_response(
@@ -552,6 +562,13 @@ class Recommender:
         self._ensure_indices()
         t0 = time.perf_counter()
         anchor_id, match_conf, candidates, emb = self._get_pre_canvas_candidates(req.query_node)
+        pool_size = req.max_suggestions * 2
+        wants_rerank = req.include_new_nodes and self._should_run_rerank(candidates)
+        # A cached rerank is free: fold it into the first event and stop, so
+        # the client never sees the provisional (pre-LLM) ordering.
+        replayed = wants_rerank and self._apply_cached_rerank(
+            self._rerank_key(req.query_node, pool_size), candidates,
+        )
         first = self._project_response(
             req=req,
             anchor_id=anchor_id,
@@ -562,12 +579,10 @@ class Recommender:
         yield ("vector", first)
 
         # Skip the LLM unless the deterministic scores leave room for doubt.
-        if not req.include_new_nodes:
-            return
-        if not self._should_run_rerank(candidates):
+        if not wants_rerank or replayed:
             return
         try:
-            self._llm_rerank(req.query_node, candidates[: req.max_suggestions * 2])
+            self._rerank(req.query_node, candidates, pool_size)
         except Exception as e:
             LOG.warning("LLM rerank failed (%s); keeping deterministic ranking", e)
             return
@@ -956,6 +971,40 @@ class Recommender:
             if margin >= self.cfg.settings.skip_rerank_if_margin_above:
                 return False
         return True
+
+    def _rerank_key(self, query: CanvasNode, pool_size: int) -> str:
+        return hash_text(
+            "rr1", _canvas_node_text(query), pool_size,
+            os.environ.get("KG_INDEX_VERSION") or "v1",
+            self.cfg.components["recommender_reranker"].model,
+        )
+
+    def _apply_cached_rerank(self, key: str, candidates: List[_Candidate]) -> bool:
+        """Replay a stored rerank onto `candidates`. True on a cache hit."""
+        cached = self._rr_cache.get(key)
+        if not cached:
+            return False
+        for c in candidates:
+            row = cached.get(c.id)
+            if not row:
+                continue
+            c.alpha = float(row.get("alpha", c.alpha))
+            if row.get("rationale"):
+                c.rationale = row["rationale"]
+        return True
+
+    def _rerank(self, query: CanvasNode, candidates: List[_Candidate], pool_size: int) -> None:
+        """LLM-rerank the top `pool_size` candidates, reusing a cached result
+        for the same query text when there is one. Raises if the LLM fails
+        (nothing is cached then, so the next request retries)."""
+        key = self._rerank_key(query, pool_size)
+        if self._apply_cached_rerank(key, candidates):
+            return
+        pool = candidates[:pool_size]
+        self._llm_rerank(query, pool)
+        self._rr_cache.set(key, {
+            c.id: {"alpha": c.alpha, "rationale": c.rationale} for c in pool
+        })
 
     def _llm_rerank(self, query: CanvasNode, candidates: List[_Candidate]) -> None:
         if not candidates:

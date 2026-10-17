@@ -730,24 +730,33 @@ async def suggest_stream(
     async def event_gen():
         t0 = time.perf_counter()
         yield {"event": "thinking", "data": "{}"}
+        send, receive = anyio.create_memory_object_stream(8)
         acc = usage.UsageAccumulator()
 
-        def run_stages():
-            with usage.bind(acc):
-                return list(app.state.recommender.stages(req))
+        # Drive the synchronous generator on a worker thread and forward each
+        # stage the moment it's produced. (Collecting the stages first meant
+        # the fast "vector" event waited for the LLM rerank, which defeated
+        # the point of streaming.)
+        def produce():
+            try:
+                with usage.bind(acc):
+                    for kind, resp in app.state.recommender.stages(req):
+                        anyio.from_thread.run(send.send, (kind, resp.model_dump_json()))
+            except Exception as e:
+                LOG.exception("/suggest/stream failed")
+                anyio.from_thread.run(send.send, ("error", str(e)))
+            finally:
+                anyio.from_thread.run(send.aclose)
 
         try:
-            # Drive the synchronous generator on a thread so the loop is
-            # free for the next request / heartbeat.
-            it = await anyio.to_thread.run_sync(run_stages)
-        except Exception as e:
-            LOG.exception("/suggest/stream failed")
-            ledger.commit(caller.user_id, caller.conversation, acc)
-            yield {"event": "error", "data": str(e)}
-            return
-        acc.conversation_total = ledger.commit(caller.user_id, caller.conversation, acc)
-        for kind, resp in it:
-            yield {"event": kind, "data": resp.model_dump_json()}
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(anyio.to_thread.run_sync, produce)
+                async for kind, data in receive:
+                    yield {"event": kind, "data": data}
+        finally:
+            # Charge the budget even if the client hung up mid-stream.
+            acc.conversation_total = ledger.commit(caller.user_id, caller.conversation, acc)
+
         yield {"event": "usage", "data": json.dumps(usage.meter(acc.conversation_total, acc.total))}
         yield {"event": "done", "data": str(int((time.perf_counter() - t0) * 1000))}
 
