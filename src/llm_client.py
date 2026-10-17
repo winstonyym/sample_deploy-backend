@@ -36,13 +36,17 @@ class ModelSpec:
     request_json_mode: bool = True
     vision: bool | None = None
     reasoning_effort: str | None = None
+    # HTTP client overrides (OpenAI-compatible backends). None keeps the SDK
+    # defaults (600 s timeout, 2 automatic retries with backoff).
+    timeout: float | None = None
+    max_retries: int | None = None
  
  
 class LLMClient(Protocol):
     def complete(self, system: str, user: str) -> str: ...
  
  
-_REASONING_PATTERNS = ("gpt-5", "o1", "o3", "o4", "gemini-3")
+_REASONING_PATTERNS = ("gpt-5", "o1", "o3", "o4", "gemini-3", "gpt-oss")
  
  
 def _is_reasoning_model(model: str) -> bool:
@@ -83,6 +87,10 @@ class OpenAICompatibleClient:
         kwargs: dict = {"api_key": api_key}
         if spec.base_url:
             kwargs["base_url"] = spec.base_url
+        if spec.timeout is not None:
+            kwargs["timeout"] = float(spec.timeout)
+        if spec.max_retries is not None:
+            kwargs["max_retries"] = int(spec.max_retries)
         self.client = OpenAI(**kwargs)
  
     def complete(self, system: str, user: str) -> str:

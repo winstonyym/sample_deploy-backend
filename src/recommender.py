@@ -1035,7 +1035,9 @@ class Recommender:
             "schema": {"scored": [{"id": "string", "alpha": "number 0..1", "rationale": "string|null"}]},
         })
         from src.llm_client import call_with_retries, extract_json
-        raw = call_with_retries(client, sys_prompt, user_prompt, retries=1)
+        # No retry: the rerank is optional polish on an already-usable
+        # ranking, and a retry after a rate-limit 429 mostly just adds wait.
+        raw = call_with_retries(client, sys_prompt, user_prompt, retries=0)
         data = extract_json(raw)
         scored = data.get("scored") or []
         by_id = {c.id: c for c in candidates}

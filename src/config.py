@@ -122,6 +122,8 @@ class Config:
             temperature=comp.temperature,
             reasoning_effort=model_row.get("reasoning_effort"),
             request_json_mode=model_row.get("request_json_mode", True),
+            timeout=model_row.get("timeout"),
+            max_retries=model_row.get("max_retries"),
         )
 
 

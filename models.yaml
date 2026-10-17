@@ -62,6 +62,21 @@ models:
     api_key_env: DEEPSEEK_API_KEY
     max_tokens: 32768
 
+  # Cerebras (OpenAI-compatible). Used for the /suggest rerank: ~0.5 s with
+  # low reasoning effort vs ~7 s on claude-haiku-4.5 for the same prompt.
+  # The account has a tight requests-per-minute limit, so fail fast instead
+  # of letting the SDK quietly retry 429s for up to a minute — the caller
+  # falls back to the deterministic ranking.
+  - name: cerebras-gpt-oss-120b
+    backend: openai
+    model: gpt-oss-120b
+    base_url: https://api.cerebras.ai/v1
+    api_key_env: CEREBRAS_API_KEY
+    reasoning_effort: low
+    max_tokens: 8192
+    timeout: 10
+    max_retries: 0
+
   # - name: qwen3.6-flash
   #   backend: openai
   #   model: qwen3.6-flash
@@ -124,7 +139,7 @@ components:
     # base_url:                 # uncomment to point at an OpenAI-compat embedding server
 
   recommender_reranker:
-    model: claude-haiku-4.5    # references `models:` catalogue above
+    model: cerebras-gpt-oss-120b   # references `models:` catalogue above
     temperature: 0.0
 
   chat_agent:
