@@ -1,0 +1,53 @@
+name: keep-supabase-awake
+
+# Scheduled heartbeat for the frontend's free-tier Supabase project, which backs
+# collaborative sessions and My Diagrams. Supabase pauses free projects after
+# low database activity over 7 days, and a paused project's hostname stops
+# resolving. Collaborative sessions don't touch the database, so regular use
+# doesn't prevent this.
+#
+# Runs public.keep_alive() (frontend/supabase/migrations/…_keep_alive.sql).
+#
+# Setup: Settings → Secrets and variables → Actions → add the repo secrets
+#   SUPABASE_URL              same value as the frontend's VITE_SUPABASE_URL
+#   SUPABASE_PUBLISHABLE_KEY  same value as VITE_SUPABASE_PUBLISHABLE_KEY
+#
+# Notes / caveats:
+#   • Unlike keep-warm, a failed ping fails the run on purpose: GitHub's failure
+#     email is the alert that the project is down or was paused anyway.
+#   • */5 means days 1, 6, 11, … 31, so the longest gap is 5 days. GitHub can
+#     delay scheduled runs by hours and may drop one, and a dropped run leaves a
+#     10-day gap. Supabase suggests a few requests a day is what's typically
+#     enough, so switch to "17 9 * * *" (daily) if the project still gets paused.
+#   • GitHub disables scheduled workflows after ~60 days of repo inactivity;
+#     push or re-enable to keep it running.
+
+on:
+  schedule:
+    - cron: "17 9 */5 * *"     # every 5 days at 09:17 UTC (off the busy :00)
+  workflow_dispatch: {}         # manual run, handy for testing
+
+permissions:
+  contents: read
+
+jobs:
+  ping-supabase:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Run keep_alive() on the database
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          if [ -z "${SUPABASE_URL}" ] || [ -z "${SUPABASE_PUBLISHABLE_KEY}" ]; then
+            echo "::error::Set the SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY repo secrets."
+            exit 1
+          fi
+          # Retries ride out a network blip; if it still fails, so does the run.
+          curl -fsS -m 30 --retry 3 --retry-delay 20 --retry-all-errors \
+            -X POST "${SUPABASE_URL}/rest/v1/rpc/keep_alive" \
+            -H "apikey: ${SUPABASE_PUBLISHABLE_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{}' \
+            -w "\nkeep_alive HTTP %{http_code} in %{time_total}s\n"

@@ -57,3 +57,8 @@ vercel env add R2_BUCKET_NAME development
 vercel env add CEREBRAS_API_KEY production --sensitive
 vercel env add CEREBRAS_API_KEY preview --sensitive
 vercel env add CEREBRAS_API_KEY development
+
+vercel env add CEREBRAS_API_KEY production --sensitive
+vercel env add CEREBRAS_API_KEY preview --sensitive
+vercel env add CEREBRAS_API_KEY development
+
